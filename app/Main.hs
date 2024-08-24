@@ -1,10 +1,10 @@
 module Main where
 
-import Data.Bits (Bits (shiftL), (.&.), (.|.))
+import Data.Bits (Bits (shiftL, xor), complement, shiftR, (.&.), (.|.))
 import qualified Data.ByteString as BS
 import Data.Void (Void)
 import Data.Word (Word16, Word32, Word64, Word8)
-import Text.Megaparsec (Parsec, parseTest, runParser)
+import Text.Megaparsec (Parsec, count, parseTest)
 import Text.Megaparsec.Byte.Binary (word16le, word32le, word64le, word8)
 
 main :: IO ()
@@ -32,11 +32,26 @@ data Header = Header
   }
   deriving (Show)
 
-data Record = Record deriving (Show)
+data Record = Record
+  { recSize :: Int,
+    recAttrs :: Word8,
+    recTSDelta :: Int,
+    recOffsetDelta :: Int,
+    recKey :: [Word8],
+    recValue :: [Word8],
+    recHeaders :: [RecordHeader]
+  }
+  deriving (Show)
+
+data RecordHeader = RecordHeader
+  { rhKey :: [Word8],
+    rhValue :: [Word8]
+  }
+  deriving (Show)
 
 data Batch = Batch
   { batchHeader :: Header,
-    records :: [Record]
+    batchRecords :: [Record]
   }
   deriving (Show)
 
@@ -45,22 +60,40 @@ parseHeader =
   Header <$> word32le <*> word32le <*> word64le <*> word8 <*> word32le <*> word16le <*> word32le <*> word64le <*> word64le <*> word64le <*> word16le <*> word32le <*> word32le
 
 parseRecord :: Parser Record
-parseRecord = undefined
+parseRecord =
+  Record <$> parseVarint <*> word8 <*> parseVarint <*> parseVarint <*> parseSizePrefixedBytes <*> parseSizePrefixedBytes <*> parseRecordHeaders
 
-newtype Varint = Varint {i :: Word64} deriving (Show)
+parseBatch :: Parser Batch
+parseBatch = do
+  hdr <- parseHeader
+  records <- count (fromIntegral $ hRecordCount hdr) parseRecord
+  return $ Batch hdr records
 
-parseVarint :: Parser Varint
-parseVarint =
-  go 0 0
+parseRecordHeader :: Parser RecordHeader
+parseRecordHeader =
+  RecordHeader <$> parseSizePrefixedBytes <*> parseSizePrefixedBytes
+
+parseRecordHeaders :: Parser [RecordHeader]
+parseRecordHeaders = do
+  sz <- parseVarint
+  count sz parseRecordHeader
+
+parseSizePrefixedBytes :: Parser [Word8]
+parseSizePrefixedBytes = do
+  sz <- parseVarint
+  count sz word8
+
+parseVarint :: Parser Int
+parseVarint = do
+  parsedInt <- go 0 0
+  return (decodeVarint parsedInt)
   where
-    shifted input shiftSize =
-      let hasLowerBitsSet = input .&. 128 /= 0
-       in if hasLowerBitsSet
-            then
-              (input .&. 0x7f) `shiftL` shiftSize
-            else
-              input `shiftL` shiftSize
-    go :: Int -> Int -> Parser Varint
+    shifted input shiftSize
+      | input .&. 128 == 0 =
+          input `shiftL` shiftSize
+      | otherwise =
+          (input .&. 0x7f) `shiftL` shiftSize
+    go :: Int -> Int -> Parser Int
     go result shiftSize = do
       nextWord <- word8
       let hasLowerBitsSet = nextWord .&. 128 /= 0
@@ -69,10 +102,14 @@ parseVarint =
       if hasLowerBitsSet
         then go newRes (shiftSize + 7)
         else
-          return $ Varint (fromIntegral newRes)
+          return newRes
+    decodeVarint x =
+      let a = x `shiftR` 1
+          b = x .&. 1
+          cm = complement b + 1
+       in a `xor` cm
 
 run :: IO ()
 run = do
   f <- loadFile
-  let foo = runParser parseHeader "" f
-  putStrLn "done!"
+  parseTest parseBatch f
