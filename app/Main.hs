@@ -4,7 +4,8 @@ import Data.Bits (Bits (shiftL, xor), complement, shiftR, (.&.), (.|.))
 import qualified Data.ByteString as BS
 import Data.Void (Void)
 import Data.Word (Word16, Word32, Word64, Word8)
-import Text.Megaparsec (Parsec, count, parseTest)
+import Text.Megaparsec (ParseErrorBundle (bundleErrors), Parsec, count, manyTill, runParser, try, (<?>))
+import Text.Megaparsec.Byte (char)
 import Text.Megaparsec.Byte.Binary (word16le, word32le, word64le, word8)
 
 main :: IO ()
@@ -41,7 +42,23 @@ data Record = Record
     recValue :: [Word8],
     recHeaders :: [RecordHeader]
   }
-  deriving (Show)
+
+instance Show Record where
+  show (Record sz attrs tsD offD k v h) =
+    "size "
+      <> show sz
+      <> " attrs "
+      <> show attrs
+      <> " ts delta "
+      <> show tsD
+      <> " offset delta "
+      <> show offD
+      <> " key size "
+      <> show (length k)
+      <> " val size "
+      <> show (length v)
+      <> " n-headers "
+      <> show (length h)
 
 data RecordHeader = RecordHeader
   { rhKey :: [Word8],
@@ -53,11 +70,26 @@ data Batch = Batch
   { batchHeader :: Header,
     batchRecords :: [Record]
   }
-  deriving (Show)
+
+instance Show Batch where
+  show (Batch h recs) = show h <> " (" <> show (length recs) <> " records)"
 
 parseHeader :: Parser Header
 parseHeader =
-  Header <$> word32le <*> word32le <*> word64le <*> word8 <*> word32le <*> word16le <*> word32le <*> word64le <*> word64le <*> word64le <*> word16le <*> word32le <*> word32le
+  Header
+    <$> word32le
+    <*> word32le
+    <*> word64le
+    <*> word8
+    <*> word32le
+    <*> word16le
+    <*> word32le
+    <*> word64le
+    <*> word64le
+    <*> word64le
+    <*> word16le
+    <*> word32le
+    <*> word32le
 
 parseRecord :: Parser Record
 parseRecord =
@@ -109,7 +141,16 @@ parseVarint = do
           cm = complement b + 1
        in a `xor` cm
 
+nullHeader :: Parser [Word8]
+nullHeader = try $ count 61 (char 0)
+
 run :: IO ()
 run = do
   f <- loadFile
-  parseTest parseBatch f
+  let parseResults = runParser (manyTill parseBatch nullHeader) "" f
+  either analyzeBundle showResults parseResults
+  where
+    analyzeBundle :: ParseErrorBundle BS.ByteString Void -> IO ()
+    analyzeBundle b =
+      print $ bundleErrors b
+    showResults = mapM_ print
